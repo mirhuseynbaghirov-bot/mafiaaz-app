@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="az">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MafiaAz</title>
+<style>
+  html,body{margin:0;height:100%;background:#101012;color:#e8e2d6;font-family:system-ui,sans-serif}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;box-sizing:border-box}
+  h1{letter-spacing:.3em;font-weight:800;margin:0}
+  #s{font-size:14px;opacity:.85;max-width:320px}
+  .ok{color:#6fd08c}.bad{color:#e06c6c}
+</style>
+</head>
+<body>
+<h1>MAFIAAZ</h1>
+<div id="s">Serverə qoşulma yoxlanılır...</div>
+<script src="vendor/supabase.js"></script>
+<script>
+(async () => {
+  const el = document.getElementById("s");
+  try {
+    const db = window.supabase.createClient(
+      "https://pgmjtimnnmcttdvfqcnw.supabase.co",
+      "sb_publishable_o_Xk7py1CvvLlU3imqwiOA_ke2Rr-HU"
+    );
+    const { error } = await db.rpc("server_now");
+    if (error) throw error;
+    el.innerHTML = '<span class="ok">Server işləyir. 1-ci mərhələ uğurludur.</span>';
+  } catch (e) {
+    el.innerHTML = '<span class="bad">Qoşulma alınmadı: ' + (e.message || e) + "</span>";
+  }
+})();
+</script>
+</body>
+</html>
