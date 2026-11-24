@@ -20,6 +20,7 @@ button.o{background:transparent;color:var(--g);border:1px solid var(--g)}
 #lobby{justify-content:space-between;pointer-events:none}
 #lobby>*{pointer-events:auto}
 .top,.bot{width:100%;max-width:420px;background:var(--p);border-radius:14px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.t{padding:9px 12px;font-size:14px;background:#1d1d23;color:var(--t);border:1px solid #38352d}.t.sel{background:var(--g);color:#16130c}
 .code{font-size:22px;font-weight:800;letter-spacing:.2em;color:var(--g)}
 </style>
 </head>
@@ -54,7 +55,14 @@ button.o{background:transparent;color:var(--g);border:1px solid var(--g)}
 
 <section class="s" id="lobby" hidden>
   <div class="top"><div><div id="rn" style="font-weight:700"></div><div class="code" id="rc"></div></div><div id="cnt" style="font-weight:700"></div></div>
-  <div class="bot"><span style="font-size:13px;opacity:.8">Oyunu başlatmaq hələlik saytdan edilir</span><button id="lv" class="o">Çıx</button></div>
+  <div class="bot" id="lb"><span style="font-size:13px;opacity:.8">Oyunu başlatmaq hələlik saytdan edilir</span><button id="lv" class="o">Çıx</button></div>
+<div class="bot" id="gp" hidden style="flex-direction:column;align-items:stretch">
+    <div id="gt" style="font-weight:700;text-align:center"></div>
+    <div id="gl" style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center"></div>
+    <button id="ga" disabled>Təsdiqlə</button>
+    <button id="gh" class="o" hidden>Gecəni tamamla</button>
+    <div class="m" id="gm" style="color:var(--t)"></div>
+  </div>
 </section>
 
 <script src="vendor/supabase.js"></script>
@@ -111,24 +119,119 @@ async function enter(code){
   ch = db.channel("lobby-" + r.id)
     .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: "room_id=eq." + r.id }, refresh)
     .on("postgres_changes", { event: "*", schema: "public", table: "room_bots", filter: "room_id=eq." + r.id }, refresh)
+    .on("postgres_changes", { event: "*", schema: "public", table: "room_game_state", filter: "room_id=eq." + r.id }, refresh)
+    .on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: "id=eq." + r.id }, refresh)
     .subscribe();
 }
 async function refresh(){
   if (!room) return;
-  let q = await db.from("room_players").select("user_id,seat_number,username").eq("room_id", room.id).order("seat_number");
-  if (q.error) q = await db.from("room_players").select("user_id,seat_number").eq("room_id", room.id).order("seat_number");
-  const b = await db.from("room_bots").select("bot_name").eq("room_id", room.id);
-  const names = (q.data || []).map(p => p.username || (p.user_id === me?.id ? uname(me) : "") || "Oyunçu").concat((b.data || []).map(x => x.bot_name));
-  setSeats(names); $("cnt").textContent = names.length + "/" + room.max_players;
+  const rr = await db.from("rooms").select("status,host_id,game_settings,max_players").eq("id", room.id).maybeSingle();
+  if (rr.data) Object.assign(room, rr.data);
+  let q = await db.from("room_players").select("user_id,seat_number,is_alive,username").eq("room_id", room.id);
+  if (q.error) q = await db.from("room_players").select("user_id,seat_number,is_alive").eq("room_id", room.id);
+  const b = await db.from("room_bots").select("id,bot_name,seat_number,is_alive").eq("room_id", room.id);
+  parts = [
+    ...(q.data || []).map(p => ({ t: "user", id: p.user_id, seat: p.seat_number, alive: p.is_alive !== false, name: p.username || (p.user_id === me?.id ? uname(me) : "") || "Oyunçu" })),
+    ...(b.data || []).map(x => ({ t: "bot", id: x.id, seat: x.seat_number, alive: x.is_alive !== false, name: x.bot_name }))
+  ].sort((x, y) => (x.seat ?? 99) - (y.seat ?? 99));
+  setSeats(parts); $("cnt").textContent = parts.length + "/" + room.max_players;
+  if (room.status === "in_progress") await loadGame(); else endGameUi();
 }
 $("lv").onclick = async () => {
   if (ch) { db.removeChannel(ch); ch = null; }
   if (room && me) await db.from("room_players").delete().eq("room_id", room.id).eq("user_id", me.id);
-  room = null; show("home");
+  room = null; endGameUi(); show("home");
 };
 
+/* ---------- Oyun ---------- */
+let gs = null, role = null, parts = [], off = 0, offOk = false, pick = null, sent = false, busy = false, pk = "", tick = null, lastOpen = null, resolving = false;
+const RN = { mafia: "MAFİYA", doctor: "HƏKİM", detective: "DETEKTİV", civilian: "MÜLKİ SAKİN" };
+const nowS = () => Date.now() + off;
+const clk = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); };
+function times(){
+  const st = gs?.phase_started_at ? new Date(gs.phase_started_at).getTime() : NaN;
+  if (!isFinite(st)) return null;
+  const set = room.game_settings || {}, d = st + (+set.discussion_seconds || 120) * 1000;
+  return { d, v: d + (+set.voting_seconds || 20) * 1000 };
+}
+const voteOpen = () => { const t = times(), n = nowS(); return !t || (n >= t.d && n < t.v); };
+const isFin = () => gs && (gs.phase === "finished" || gs.game_over === true);
+async function loadGame(){
+  const [g, r] = await Promise.all([
+    db.from("room_game_state").select("*").eq("room_id", room.id).maybeSingle(),
+    db.from("room_player_roles").select("role").eq("room_id", room.id).eq("user_id", me.id).maybeSingle()
+  ]);
+  if (!g.data) return;
+  const k = g.data.phase + "-" + g.data.round_number;
+  if (k !== pk) { pk = k; pick = null; sent = false; $("gm").textContent = ""; }
+  gs = g.data; role = r.data?.role || "civilian";
+  if (!offOk) { offOk = true; const sv = await db.rpc("server_now"); const t = new Date(sv.data).getTime(); if (isFinite(t)) off = t - Date.now(); }
+  paintGame();
+  if (!tick) tick = setInterval(gTick, 500);
+}
+function paintGame(){
+  $("gp").hidden = false; $("lb").hidden = true;
+  const night = gs.phase === "night"; mood.t = night ? .12 : 1;
+  const L = $("gl"); L.innerHTML = "";
+  if (isFin()) {
+    $("gt").textContent = gs.winner === "mafia" ? "MAFİYA QALİB GƏLDİ" : "ŞƏHƏR QALİB GƏLDİ";
+    $("ga").hidden = true; $("gh").hidden = true; $("lb").hidden = false; return;
+  }
+  $("ga").hidden = false;
+  const alive = parts.find(p => p.t === "user" && p.id === me.id)?.alive !== false;
+  const can = alive && (night ? ["mafia", "doctor", "detective"].includes(role) : voteOpen());
+  if (can) parts.filter(p => p.alive && !(p.t === "user" && p.id === me.id)).forEach(p => {
+    const b = document.createElement("button"); b.className = "t" + (pick === p ? " sel" : ""); b.textContent = p.name;
+    b.onclick = () => { if (sent) return; pick = p; paintGame(); }; L.appendChild(b);
+  });
+  $("ga").disabled = !(can && pick && !sent && !busy);
+  $("ga").textContent = sent ? "GÖNDƏRİLDİ" : night ? "Təsdiqlə" : "Səs ver";
+  $("gh").hidden = !(night && room.host_id === me.id);
+  if (!alive) $("gm").textContent = "Sən oyundan çıxmısan, izləyicisən.";
+  else if (night && !can) $("gm").textContent = "Bu gecə xüsusi hərəkətin yoxdur.";
+  else if (!night && !can && !sent) $("gm").textContent = "Müzakirə gedir. Səsvermə tezliklə açılacaq.";
+  gTick();
+}
+function gTick(){
+  if (!gs || !room || isFin()) return;
+  const r = gs.round_number || 1, me_ = "Rolun: " + (RN[role] || "—");
+  if (gs.phase === "night") { $("gt").textContent = "GECƏ " + r + " · " + me_; return; }
+  const t = times(), n = nowS();
+  if (!t) { $("gt").textContent = "GÜNDÜZ " + r + " · " + me_; return; }
+  const txt = n < t.d ? "Müzakirə " + clk(t.d - n) : n < t.v ? "Səsvermə " + clk(t.v - n) : "Hesablanır...";
+  $("gt").textContent = "GÜNDÜZ " + r + " · " + txt + " · " + me_;
+  const o = voteOpen(); if (o !== lastOpen) { lastOpen = o; paintGame(); }
+  if (n >= t.v && room.host_id === me.id && !resolving) finishVote();
+}
+async function finishVote(){
+  resolving = true;
+  await db.rpc("run_bot_votes", { p_room_id: room.id }); await db.rpc("resolve_voting", { p_room_id: room.id });
+  await refresh(); setTimeout(() => resolving = false, 3000);
+}
+$("gh").onclick = async () => {
+  $("gh").disabled = true;
+  await db.rpc("run_bot_night_actions", { p_room_id: room.id });
+  const r = await db.rpc("resolve_night", { p_room_id: room.id });
+  if (r.error) $("gm").textContent = r.error.message;
+  $("gh").disabled = false; await refresh();
+};
+$("ga").onclick = async () => {
+  if (!pick || busy || sent) return; busy = true;
+  const tu = pick.t === "user" ? pick.id : null, tb = pick.t === "bot" ? pick.id : null;
+  const r = gs.phase === "night"
+    ? await db.rpc("submit_night_action", { p_room_id: room.id, p_action_type: { mafia: "kill", doctor: "protect", detective: "investigate" }[role], p_target_user_id: tu, p_target_bot_id: tb })
+    : await db.rpc("submit_vote", { p_room_id: room.id, p_target_user_id: tu, p_target_bot_id: tb });
+  busy = false;
+  if (r.error) { $("gm").textContent = r.error.message; return paintGame(); }
+  sent = true; $("gm").textContent = norm(r.data)?.message || "Seçimin qəbul edildi."; paintGame();
+};
+function endGameUi(){
+  if (tick) { clearInterval(tick); tick = null; }
+  gs = null; pk = ""; mood.t = 1; $("gp").hidden = true; $("lb").hidden = false;
+}
+
 /* ---------- 3D masa ---------- */
-let R, S, C, seats = [], N = 0, built = 0;
+let R, S, C, amb, dl, seats = [], N = 0, mood = { v: 1, t: 1 };
 function label(){
   const c = document.createElement("canvas"); c.width = 256; c.height = 64;
   const t = new THREE.CanvasTexture(c), s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false }));
@@ -145,8 +248,8 @@ function init(){
   R.setPixelRatio(Math.min(devicePixelRatio, 2));
   S = new THREE.Scene(); S.background = new THREE.Color(0x0b0b0d); S.fog = new THREE.Fog(0x0b0b0d, 14, 32);
   C = new THREE.PerspectiveCamera(50, 1, .1, 60);
-  S.add(new THREE.AmbientLight(0x8890a0, 1.4));
-  const d = new THREE.DirectionalLight(0xffd9a0, 2.2); d.position.set(2, 8, 3); S.add(d);
+  amb = new THREE.AmbientLight(0x8890a0, 1.4); S.add(amb);
+  dl = new THREE.DirectionalLight(0xffd9a0, 2.2); dl.position.set(2, 8, 3); S.add(dl);
   const m = (c, r = .8) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
   const fl = new THREE.Mesh(new THREE.CircleGeometry(14, 48), m(0x1a1714)); fl.rotation.x = -Math.PI / 2; S.add(fl);
   const tb = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, .18, 48), m(0x4a2f1a, .5)); tb.position.y = 1; S.add(tb);
@@ -157,6 +260,8 @@ function init(){
   (function loop(){
     requestAnimationFrame(loop);
     if (!room) return;
+    mood.v += (mood.t - mood.v) * .04; amb.intensity = .3 + 1.1 * mood.v; dl.intensity = .3 + 1.9 * mood.v;
+    S.background.setRGB(.02 + .02 * mood.v, .025 + .02 * mood.v, .04 + .01 * mood.v); S.fog.color.copy(S.background);
     a += .003; const p = C.aspect < 1, dist = p ? 14 : 9, h = p ? 8 : 5;
     C.position.set(Math.cos(a) * dist, h, Math.sin(a) * dist); C.lookAt(0, 1, 0);
     R.render(S, C);
@@ -168,16 +273,21 @@ function buildScene(n){
   for (let i = 0; i < n; i++){
     const g = new THREE.Group(), ang = i / n * Math.PI * 2;
     g.position.set(Math.cos(ang) * 3.3, 0, Math.sin(ang) * 3.3);
-    const ch = new THREE.Mesh(new THREE.BoxGeometry(.8, .9, .8), new THREE.MeshStandardMaterial({ color: 0x2b1c10 })); ch.position.y = .45; g.add(ch);
+    const chr = new THREE.Mesh(new THREE.BoxGeometry(.8, .9, .8), new THREE.MeshStandardMaterial({ color: 0x2b1c10 })); chr.position.y = .45; g.add(chr);
     const f = new THREE.Group(), col = new THREE.Color().setHSL(i / n, .35, .45);
     const bd = new THREE.Mesh(new THREE.CylinderGeometry(.28, .36, .9, 14), new THREE.MeshStandardMaterial({ color: col })); bd.position.y = 1.3;
     const hd = new THREE.Mesh(new THREE.SphereGeometry(.24, 16, 12), new THREE.MeshStandardMaterial({ color: 0xd9b48f })); hd.position.y = 2;
     const lb = label(); lb.position.y = 2.6; f.add(bd, hd, lb); f.visible = false; g.add(f);
-    g.lookAt(0, 0, 0); S.add(g); seats.push({ g, f, lb });
+    g.lookAt(0, 0, 0); S.add(g); seats.push({ g, f, lb, bd, col });
   }
 }
-function setSeats(names){
-  seats.forEach((s, i) => { s.f.visible = i < names.length; if (i < names.length) setName(s.lb, names[i]); });
+function setSeats(ps){
+  seats.forEach((st, i) => {
+    const p = ps[i]; st.f.visible = !!p; if (!p) return;
+    st.f.rotation.z = p.alive ? 0 : 1.45; st.f.position.y = p.alive ? 0 : .35;
+    st.bd.material.color.set(p.alive ? st.col : 0x555555);
+    setName(st.lb, (p.alive ? "" : "✝ ") + p.name);
+  });
 }
 </script>
 </body>
