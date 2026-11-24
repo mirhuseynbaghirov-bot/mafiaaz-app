@@ -2,35 +2,183 @@
 <html lang="az">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>MafiaAz</title>
 <style>
-  html,body{margin:0;height:100%;background:#101012;color:#e8e2d6;font-family:system-ui,sans-serif}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;box-sizing:border-box}
-  h1{letter-spacing:.3em;font-weight:800;margin:0}
-  #s{font-size:14px;opacity:.85;max-width:320px}
-  .ok{color:#6fd08c}.bad{color:#e06c6c}
+:root{--g:#c9a35a;--bg:#0b0b0d;--p:rgba(20,20,24,.88);--t:#ece6d8}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--t);font-family:system-ui,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:none}
+.s{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+.s[hidden]{display:none}
+h1{margin:0 0 8px;letter-spacing:.35em;font-weight:800;color:var(--g)}
+.box{width:100%;max-width:340px;background:var(--p);border:1px solid #2c2a25;border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:10px}
+input,select{width:100%;padding:13px;border-radius:10px;border:1px solid #38352d;background:#15151a;color:var(--t);font-size:16px}
+button{padding:13px;border:0;border-radius:10px;background:var(--g);color:#16130c;font-weight:700;font-size:15px}
+button.o{background:transparent;color:var(--g);border:1px solid var(--g)}
+.m{min-height:18px;font-size:13px;color:#e08a8a;text-align:center}
+#lobby{justify-content:space-between;pointer-events:none}
+#lobby>*{pointer-events:auto}
+.top,.bot{width:100%;max-width:420px;background:var(--p);border-radius:14px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.code{font-size:22px;font-weight:800;letter-spacing:.2em;color:var(--g)}
 </style>
 </head>
 <body>
-<h1>MAFIAAZ</h1>
-<div id="s">Serverə qoşulma yoxlanılır...</div>
+<canvas id="cv"></canvas>
+
+<section class="s" id="auth" hidden>
+  <h1>MAFIAAZ</h1>
+  <div class="box">
+    <input id="em" type="email" placeholder="E-poçt" autocomplete="email">
+    <input id="pw" type="password" placeholder="Şifrə" autocomplete="current-password">
+    <input id="un" placeholder="İstifadəçi adı (yalnız qeydiyyatda)">
+    <button id="li">Daxil ol</button>
+    <button id="su" class="o">Qeydiyyat</button>
+    <div class="m" id="am"></div>
+  </div>
+</section>
+
+<section class="s" id="home" hidden>
+  <h1>MAFIAAZ</h1>
+  <div class="box">
+    <div id="hi" style="text-align:center;color:var(--g);font-weight:700"></div>
+    <input id="rname" placeholder="Otaq adı" value="GECƏ ŞƏHƏRİ">
+    <select id="rmax"><option>6</option><option selected>8</option><option>10</option><option>12</option></select>
+    <button id="mk">Otaq yarat</button>
+    <input id="jc" placeholder="Otaq kodu" style="text-transform:uppercase">
+    <button id="jn" class="o">Qoşul</button>
+    <button id="lo" class="o" style="border-color:#555;color:#999">Çıx</button>
+    <div class="m" id="hm"></div>
+  </div>
+</section>
+
+<section class="s" id="lobby" hidden>
+  <div class="top"><div><div id="rn" style="font-weight:700"></div><div class="code" id="rc"></div></div><div id="cnt" style="font-weight:700"></div></div>
+  <div class="bot"><span style="font-size:13px;opacity:.8">Oyunu başlatmaq hələlik saytdan edilir</span><button id="lv" class="o">Çıx</button></div>
+</section>
+
 <script src="vendor/supabase.js"></script>
-<script>
-(async () => {
-  const el = document.getElementById("s");
-  try {
-    const db = window.supabase.createClient(
-      "https://pgmjtimnnmcttdvfqcnw.supabase.co",
-      "sb_publishable_o_Xk7py1CvvLlU3imqwiOA_ke2Rr-HU"
-    );
-    const { error } = await db.rpc("server_now");
-    if (error) throw error;
-    el.innerHTML = '<span class="ok">Server işləyir. 1-ci mərhələ uğurludur.</span>';
-  } catch (e) {
-    el.innerHTML = '<span class="bad">Qoşulma alınmadı: ' + (e.message || e) + "</span>";
+<script type="module">
+import * as THREE from "./vendor/three.module.min.js";
+const db = supabase.createClient("https://pgmjtimnnmcttdvfqcnw.supabase.co","sb_publishable_o_Xk7py1CvvLlU3imqwiOA_ke2Rr-HU");
+const $ = i => document.getElementById(i);
+const show = n => { ["auth","home","lobby"].forEach(s => $(s).hidden = s !== n); $("cv").style.display = n === "lobby" ? "block" : "none"; };
+const norm = d => { if (typeof d === "string") try { d = JSON.parse(d); } catch {} return Array.isArray(d) ? d[0] : d; };
+let me = null, room = null, ch = null;
+
+/* ---------- Giriş ---------- */
+const uname = u => (u?.user_metadata?.username || "").trim();
+function route(u){ me = u; if (!u) return show("auth"); $("hi").textContent = uname(u) || u.email; if (!room) show("home"); }
+db.auth.getSession().then(({data}) => route(data.session?.user || null));
+db.auth.onAuthStateChange((_e, s) => setTimeout(() => route(s?.user || null), 0));
+$("li").onclick = async () => {
+  $("am").textContent = "";
+  const { error } = await db.auth.signInWithPassword({ email: $("em").value.trim(), password: $("pw").value });
+  if (error) $("am").textContent = error.message;
+};
+$("su").onclick = async () => {
+  const username = $("un").value.trim();
+  if (username.length < 3) return $("am").textContent = "İstifadəçi adı ən azı 3 simvol olmalıdır.";
+  const { error } = await db.auth.signUp({ email: $("em").value.trim(), password: $("pw").value, options: { data: { username } } });
+  $("am").textContent = error ? error.message : "Qeydiyyat tamam. E-poçt təsdiqi tələb olunursa, təsdiqləyib daxil olun.";
+};
+$("lo").onclick = () => db.auth.signOut();
+
+/* ---------- Otaq ---------- */
+$("mk").onclick = async () => {
+  $("hm").textContent = "";
+  const { data, error } = await db.rpc("create_room", { p_room_name: $("rname").value.trim() || "GECƏ ŞƏHƏRİ", p_max_players: +$("rmax").value, p_language: "az" });
+  const r = norm(data);
+  if (error || !r?.room_code) return $("hm").textContent = error?.message || "Otaq yaradıla bilmədi.";
+  enter(r.room_code);
+};
+$("jn").onclick = async () => {
+  $("hm").textContent = "";
+  const code = $("jc").value.trim().toUpperCase();
+  if (!code) return $("hm").textContent = "Kodu yazın.";
+  const pw = await db.rpc("room_requires_password", { p_room_code: code });
+  if (pw.data === true) return $("hm").textContent = "Parollu otaqlar hələlik tətbiqdə dəstəklənmir.";
+  const { data, error } = await db.rpc("join_room", { p_room_code: code });
+  const r = norm(data);
+  if (error || r?.success === false) return $("hm").textContent = error?.message || r?.message || "Qoşulmaq alınmadı.";
+  enter(code);
+};
+async function enter(code){
+  const { data: r } = await db.from("rooms").select("id,room_code,room_name,max_players").eq("room_code", code).maybeSingle();
+  if (!r) return $("hm").textContent = "Otaq tapılmadı.";
+  room = r; $("rn").textContent = r.room_name; $("rc").textContent = r.room_code;
+  show("lobby"); buildScene(r.max_players || 8); await refresh();
+  ch = db.channel("lobby-" + r.id)
+    .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: "room_id=eq." + r.id }, refresh)
+    .on("postgres_changes", { event: "*", schema: "public", table: "room_bots", filter: "room_id=eq." + r.id }, refresh)
+    .subscribe();
+}
+async function refresh(){
+  if (!room) return;
+  let q = await db.from("room_players").select("user_id,seat_number,username").eq("room_id", room.id).order("seat_number");
+  if (q.error) q = await db.from("room_players").select("user_id,seat_number").eq("room_id", room.id).order("seat_number");
+  const b = await db.from("room_bots").select("bot_name").eq("room_id", room.id);
+  const names = (q.data || []).map(p => p.username || (p.user_id === me?.id ? uname(me) : "") || "Oyunçu").concat((b.data || []).map(x => x.bot_name));
+  setSeats(names); $("cnt").textContent = names.length + "/" + room.max_players;
+}
+$("lv").onclick = async () => {
+  if (ch) { db.removeChannel(ch); ch = null; }
+  if (room && me) await db.from("room_players").delete().eq("room_id", room.id).eq("user_id", me.id);
+  room = null; show("home");
+};
+
+/* ---------- 3D masa ---------- */
+let R, S, C, seats = [], N = 0, built = 0;
+function label(){
+  const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+  const t = new THREE.CanvasTexture(c), s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false }));
+  s.scale.set(1.6, .4, 1); s.userData = { c, t }; return s;
+}
+function setName(sp, text){
+  const x = sp.userData.c.getContext("2d"); x.clearRect(0, 0, 256, 64);
+  x.fillStyle = "rgba(0,0,0,.65)"; x.fillRect(0, 8, 256, 48);
+  x.fillStyle = "#ece6d8"; x.font = "bold 28px sans-serif"; x.textAlign = "center"; x.fillText(text.slice(0, 14), 128, 41);
+  sp.userData.t.needsUpdate = true;
+}
+function init(){
+  R = new THREE.WebGLRenderer({ canvas: $("cv"), antialias: true });
+  R.setPixelRatio(Math.min(devicePixelRatio, 2));
+  S = new THREE.Scene(); S.background = new THREE.Color(0x0b0b0d); S.fog = new THREE.Fog(0x0b0b0d, 14, 32);
+  C = new THREE.PerspectiveCamera(50, 1, .1, 60);
+  S.add(new THREE.AmbientLight(0x8890a0, 1.4));
+  const d = new THREE.DirectionalLight(0xffd9a0, 2.2); d.position.set(2, 8, 3); S.add(d);
+  const m = (c, r = .8) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
+  const fl = new THREE.Mesh(new THREE.CircleGeometry(14, 48), m(0x1a1714)); fl.rotation.x = -Math.PI / 2; S.add(fl);
+  const tb = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, .18, 48), m(0x4a2f1a, .5)); tb.position.y = 1; S.add(tb);
+  const lg = new THREE.Mesh(new THREE.CylinderGeometry(.35, .5, 1, 16), m(0x2a1a0e)); lg.position.y = .5; S.add(lg);
+  const sz = () => { R.setSize(innerWidth, innerHeight, false); C.aspect = innerWidth / innerHeight; C.updateProjectionMatrix(); };
+  addEventListener("resize", sz); sz();
+  let a = 0;
+  (function loop(){
+    requestAnimationFrame(loop);
+    if (!room) return;
+    a += .003; const p = C.aspect < 1, dist = p ? 14 : 9, h = p ? 8 : 5;
+    C.position.set(Math.cos(a) * dist, h, Math.sin(a) * dist); C.lookAt(0, 1, 0);
+    R.render(S, C);
+  })();
+}
+function buildScene(n){
+  if (!R) init();
+  seats.forEach(s => S.remove(s.g)); seats = []; N = n;
+  for (let i = 0; i < n; i++){
+    const g = new THREE.Group(), ang = i / n * Math.PI * 2;
+    g.position.set(Math.cos(ang) * 3.3, 0, Math.sin(ang) * 3.3);
+    const ch = new THREE.Mesh(new THREE.BoxGeometry(.8, .9, .8), new THREE.MeshStandardMaterial({ color: 0x2b1c10 })); ch.position.y = .45; g.add(ch);
+    const f = new THREE.Group(), col = new THREE.Color().setHSL(i / n, .35, .45);
+    const bd = new THREE.Mesh(new THREE.CylinderGeometry(.28, .36, .9, 14), new THREE.MeshStandardMaterial({ color: col })); bd.position.y = 1.3;
+    const hd = new THREE.Mesh(new THREE.SphereGeometry(.24, 16, 12), new THREE.MeshStandardMaterial({ color: 0xd9b48f })); hd.position.y = 2;
+    const lb = label(); lb.position.y = 2.6; f.add(bd, hd, lb); f.visible = false; g.add(f);
+    g.lookAt(0, 0, 0); S.add(g); seats.push({ g, f, lb });
   }
-})();
+}
+function setSeats(names){
+  seats.forEach((s, i) => { s.f.visible = i < names.length; if (i < names.length) setName(s.lb, names[i]); });
+}
 </script>
 </body>
 </html>
