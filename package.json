@@ -1,0 +1,13 @@
+{
+  "name": "mafiaaz-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "prepare-web": "node prepare.js" },
+  "dependencies": {
+    "@capacitor/android": "6.1.2",
+    "@capacitor/cli": "6.1.2",
+    "@capacitor/core": "6.1.2",
+    "@supabase/supabase-js": "2.45.4",
+    "three": "0.160.0"
+  }
+}
