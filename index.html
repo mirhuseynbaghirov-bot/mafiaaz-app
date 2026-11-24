@@ -55,7 +55,12 @@ button.o{background:transparent;color:var(--g);border:1px solid var(--g)}
 
 <section class="s" id="lobby" hidden>
   <div class="top"><div><div id="rn" style="font-weight:700"></div><div class="code" id="rc"></div></div><div id="cnt" style="font-weight:700"></div></div>
-  <div class="bot" id="lb"><span style="font-size:13px;opacity:.8">Oyunu başlatmaq hələlik saytdan edilir</span><button id="lv" class="o">Çıx</button></div>
+  <div class="box" id="cp" hidden style="max-width:420px;padding:8px;gap:6px">
+    <div style="display:flex;gap:6px"><button class="t sel" id="c1">ŞƏHƏR</button><button class="t" id="c2" hidden>MAFİYA</button></div>
+    <div id="cl" style="height:22vh;overflow-y:auto"></div>
+    <div style="display:flex;gap:6px"><input id="ci" placeholder="Mesaj yaz..." maxlength="300"><button id="cs" style="padding:10px 16px">➤</button></div>
+  </div>
+  <div class="bot" id="lb" style="flex-wrap:wrap"><span id="lt" style="font-size:13px;opacity:.85;flex:1 1 100%"></span><button id="bt" class="o" hidden>+ Bot</button><button id="st" hidden>Oyunu başlat</button><button id="lv" class="o">Çıx</button></div>
 <div class="bot" id="gp" hidden style="flex-direction:column;align-items:stretch">
     <div id="gt" style="font-weight:700;text-align:center"></div>
     <div id="gl" style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center"></div>
@@ -136,7 +141,23 @@ async function refresh(){
   ].sort((x, y) => (x.seat ?? 99) - (y.seat ?? 99));
   setSeats(parts); $("cnt").textContent = parts.length + "/" + room.max_players;
   if (room.status === "in_progress") await loadGame(); else endGameUi();
+  const host = room.host_id === me?.id, waiting = room.status === "waiting";
+  $("bt").hidden = $("st").hidden = !(host && waiting);
+  if (!lobbyMsg) $("lt").textContent = !waiting ? "" : host ? "Oyunçuları gözləyin, sonra oyunu başladın." : "Host oyunu başladacaq.";
 }
+let lobbyMsg = false;
+const lmsg = t => { lobbyMsg = !!t; $("lt").textContent = t; };
+$("bt").onclick = async () => {
+  const { data, error } = await db.rpc("add_room_bot", { p_room_id: room.id }), r = norm(data);
+  if (error || r?.success === false) lmsg(error?.message || r?.message || "Bot əlavə edilə bilmədi."); else lmsg("");
+};
+$("st").onclick = async () => {
+  $("st").disabled = true;
+  const { data, error } = await db.rpc("start_mafia_game", { p_room_id: room.id });
+  $("st").disabled = false;
+  if (error || data === false) return lmsg(error?.message || "Oyun başlatıla bilmədi (oyunçu sayı kifayət etmir?).");
+  lmsg(""); await refresh();
+};
 $("lv").onclick = async () => {
   if (ch) { db.removeChannel(ch); ch = null; }
   if (room && me) await db.from("room_players").delete().eq("room_id", room.id).eq("user_id", me.id);
@@ -164,13 +185,13 @@ async function loadGame(){
   if (!g.data) return;
   const k = g.data.phase + "-" + g.data.round_number;
   if (k !== pk) { pk = k; pick = null; sent = false; $("gm").textContent = ""; }
-  gs = g.data; role = r.data?.role || "civilian";
+  gs = g.data; role = r.data?.role || "civilian"; if (!cch) startChat();
   if (!offOk) { offOk = true; const sv = await db.rpc("server_now"); const t = new Date(sv.data).getTime(); if (isFinite(t)) off = t - Date.now(); }
   paintGame();
   if (!tick) tick = setInterval(gTick, 500);
 }
 function paintGame(){
-  $("gp").hidden = false; $("lb").hidden = true;
+  $("gp").hidden = false; $("lb").hidden = true; $("cp").hidden = false; updChat();
   const night = gs.phase === "night"; mood.t = night ? .12 : 1;
   const L = $("gl"); L.innerHTML = "";
   if (isFin()) {
@@ -227,8 +248,44 @@ $("ga").onclick = async () => {
 };
 function endGameUi(){
   if (tick) { clearInterval(tick); tick = null; }
-  gs = null; pk = ""; mood.t = 1; $("gp").hidden = true; $("lb").hidden = false;
+  gs = null; pk = ""; mood.t = 1; $("gp").hidden = true; $("lb").hidden = false; $("cp").hidden = true; stopChat();
 }
+
+/* ---------- Çat ---------- */
+let cch = null, cseen = new Set(), ctab = "city";
+function addMsg(m){
+  if (!m || cseen.has(m.id)) return; cseen.add(m.id);
+  if (m.channel === "mafia" && role !== "mafia") return;
+  const d = document.createElement("div"), ch_ = m.system ? "all" : (m.channel || "city");
+  d.dataset.c = ch_; d.style.cssText = "font-size:13px;padding:2px 0" + (m.system ? ";opacity:.7;font-style:italic" : "") + (ch_ === "mafia" ? ";color:#e08a8a" : "");
+  d.textContent = (m.system ? "" : (m.author_name || "?") + ": ") + m.body;
+  d.hidden = ch_ !== "all" && ch_ !== ctab; $("cl").appendChild(d); $("cl").scrollTop = 1e9;
+}
+async function startChat(){
+  cseen = new Set(); $("cl").innerHTML = "";
+  const { data } = await db.from("room_messages").select("*").eq("room_id", room.id).order("id").limit(80);
+  (data || []).forEach(addMsg);
+  cch = db.channel("chat-" + room.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "room_messages", filter: "room_id=eq." + room.id }, p => addMsg(p.new)).subscribe();
+}
+function stopChat(){ if (cch) { db.removeChannel(cch); cch = null; } }
+function updChat(){
+  if (!gs) return;
+  const night = gs.phase === "night", alive = parts.find(p => p.t === "user" && p.id === me.id)?.alive !== false;
+  $("c2").hidden = role !== "mafia"; if (ctab === "mafia" && role !== "mafia") ctab = "city";
+  const can = alive && !isFin() && ((ctab === "city" && !night) || (ctab === "mafia" && night));
+  $("ci").disabled = $("cs").disabled = !can;
+  $("ci").placeholder = !alive ? "Ölənlər yaza bilməz" : can ? "Mesaj yaz..." : ctab === "city" ? "Şəhər yatır..." : "Mafiya yalnız gecə danışır";
+  $("c1").classList.toggle("sel", ctab === "city"); $("c2").classList.toggle("sel", ctab === "mafia");
+  [...$("cl").children].forEach(d => d.hidden = d.dataset.c !== "all" && d.dataset.c !== ctab);
+}
+$("c1").onclick = () => { ctab = "city"; updChat(); };
+$("c2").onclick = () => { ctab = "mafia"; updChat(); };
+$("cs").onclick = async () => {
+  const b = $("ci").value.trim(); if (!b || $("ci").disabled) return; $("ci").value = "";
+  const { error } = await db.from("room_messages").insert({ room_id: room.id, author_name: uname(me) || "Oyunçu", channel: ctab, body: b.slice(0, 300) });
+  if (error) $("gm").textContent = error.message;
+};
+$("ci").onkeydown = e => { if (e.key === "Enter") $("cs").click(); };
 
 /* ---------- 3D masa ---------- */
 let R, S, C, amb, dl, seats = [], N = 0, mood = { v: 1, t: 1 };
